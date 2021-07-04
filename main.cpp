@@ -99,18 +99,12 @@ static void inspect_file_task(const std::filesystem::directory_entry& entry)
 
   std::string line;
   const auto& extension = entry.path().extension().string();
-  if (extension == ".js") {
-    while (getline(file, line)) {
-      if (line.find(js_suspicious) != std::string::npos) {
-        ++n_js_detects;
-        ++available_threads;
-        cv.notify_all();
-        return;
-      }
-    }
-  }
 
   while (getline(file, line)) {
+    if (extension == ".js" && line.find(js_suspicious) != std::string::npos) {
+      ++n_js_detects;
+      break;
+    }
     if (line.find(unix_suspicious) != std::string::npos) {
       ++n_unix_detects;
       break;
