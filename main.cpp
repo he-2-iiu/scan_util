@@ -1,19 +1,24 @@
 #include <iostream>
 #include <string>
+#include <vector>
 #include <fstream>
 #include <filesystem>
 #include <chrono>
+#include <thread>
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
 
-enum class Result
-{
-  error,
-  js_suspicious,
-  unix_suspicious,
-  macos_suspicious,
-  none
-};
+constexpr unsigned thread_max = 4;
+static std::atomic<unsigned> available_threads = thread_max;
+static std::condition_variable cv;
 
-static Result inspect_file(const std::filesystem::directory_entry& entry);
+static std::atomic<size_t> n_errors{};
+static std::atomic<size_t> n_js_detects{};
+static std::atomic<size_t> n_unix_detects{};
+static std::atomic<size_t> n_macos_detects{};
+
+static void inspect_file_task(const std::filesystem::directory_entry& entry);
 
 int main(int argc, char* argv[])
 {
@@ -31,38 +36,31 @@ int main(int argc, char* argv[])
     std::cerr << dir_path << " is not a directory\n";
     exit(EXIT_FAILURE);
   }
+  if (std::ifstream {dir_path}.is_open()) {
+    std::cerr << "Not enough permissions to open " << dir_path << '\n';
+    exit(EXIT_FAILURE);
+  }
 
   size_t n_searched{};
-  size_t n_errors{};
-  size_t n_js_detects{};
-  size_t n_unix_detects{};
-  size_t n_macos_detects{};
+  std::vector<std::thread> tasks{};
+  tasks.reserve(thread_max);
+  std::mutex m{};
+  std::unique_lock<std::mutex> lock {m};
 
   auto start{ std::chrono::high_resolution_clock::now() };
 
   for (const auto& entry : std::filesystem::directory_iterator{ dir_path,
                                                                 std::filesystem::directory_options::skip_permission_denied }) {
     ++n_searched;
-    Result res{ inspect_file(entry) };
-    switch (res) {
-      case Result::error:
-        ++n_errors;
-        break;
-      case Result::js_suspicious:
-        ++n_js_detects;
-        break;
-      case Result::unix_suspicious:
-        ++n_unix_detects;
-        break;
-      case Result::macos_suspicious:
-        ++n_macos_detects;
-        break;
-      case Result::none:
-        break;
-      default:
-        ;
-    }
+    cv.wait(lock, [&] {
+      return available_threads > 0;
+    });
+    --available_threads;
+    tasks.emplace_back(std::thread(inspect_file_task, entry));
   }
+
+  for (auto &thread : tasks)
+    thread.join();
 
   auto duration{ std::chrono::high_resolution_clock::now() - start };
   auto duration_s = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
@@ -82,11 +80,14 @@ int main(int argc, char* argv[])
   return EXIT_SUCCESS;
 }
 
-static Result inspect_file(const std::filesystem::directory_entry& entry)
+static void inspect_file_task(const std::filesystem::directory_entry& entry)
 {
   std::ifstream file{ entry.path() };
   if (!file.is_open()) {
-    return Result::error;
+    ++n_errors;
+    ++available_threads;
+    cv.notify_all();
+    return;
   }
 
   const char* js_suspicious{ "<script>evil_script()</script>" };
@@ -98,18 +99,24 @@ static Result inspect_file(const std::filesystem::directory_entry& entry)
   if (extension == ".js") {
     while (getline(file, line)) {
       if (line.find(js_suspicious) != std::string::npos) {
-        return Result::js_suspicious;
+        ++n_js_detects;
+        ++available_threads;
+        cv.notify_all();
+        return;
       }
     }
   }
 
   while (getline(file, line)) {
     if (line.find(unix_suspicious) != std::string::npos) {
-      return Result::unix_suspicious;
+      ++n_unix_detects;
+      break;
     }
     if (line.find(macos_suspicious) != std::string::npos) {
-      return Result::macos_suspicious;
+      ++n_macos_detects;
+      break;
     }
   }
-  return Result::none;
+  ++available_threads;
+  cv.notify_all();
 }
