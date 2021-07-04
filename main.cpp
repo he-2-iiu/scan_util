@@ -36,9 +36,12 @@ int main(int argc, char* argv[])
     std::cerr << dir_path << " is not a directory\n";
     exit(EXIT_FAILURE);
   }
-  if (std::ifstream {dir_path}.is_open()) {
-    std::cerr << "Not enough permissions to open " << dir_path << '\n';
-    exit(EXIT_FAILURE);
+  {
+    std::ifstream dir{dir_path};
+    if (!dir.is_open()) {
+      std::cerr << "Not enough permissions to open " << dir_path << '\n';
+      exit(EXIT_FAILURE);
+    }
   }
 
   size_t n_searched{};
